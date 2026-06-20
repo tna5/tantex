@@ -9,4 +9,6 @@ node_modules/
 dist
 bun.lock
 .vitepress
+website/.vitepress/dist
+website/.vitepress/cache
 .claude/
