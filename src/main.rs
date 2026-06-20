@@ -98,16 +98,19 @@ fn log_startup(c: &Config) {
         c.max_merge_factor, c.min_num_segments);
     eprintln!("  {cyan}│{reset}");
 
-    let fd_limit = unsafe {
-        let mut rlim: libc::rlimit = std::mem::zeroed();
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
-            Some(rlim.rlim_cur)
-        } else {
-            None
+    #[cfg(unix)]
+    {
+        let fd_limit = unsafe {
+            let mut rlim: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
+                Some(rlim.rlim_cur)
+            } else {
+                None
+            }
+        };
+        if let Some(limit) = fd_limit {
+            eprintln!("  {cyan}│{reset} fd limit             {}", fmt_num(limit as usize));
         }
-    };
-    if let Some(limit) = fd_limit {
-        eprintln!("  {cyan}│{reset} fd limit             {}", fmt_num(limit as usize));
     }
     eprintln!("  {cyan}╰─{reset} {dim}listening on {} and :{}{reset}", c.socket_path, c.http_port);
     eprintln!();
@@ -115,6 +118,7 @@ fn log_startup(c: &Config) {
 
 /// Raise the soft `RLIMIT_NOFILE` to the hard limit (capped at 65536).
 /// Prevents "Too many open files" errors when many indexes/segments are loaded.
+#[cfg(unix)]
 fn raise_fd_limit() {
     unsafe {
         let mut rlim: libc::rlimit = std::mem::zeroed();
@@ -133,6 +137,11 @@ fn raise_fd_limit() {
             }
         }
     }
+}
+
+#[cfg(not(unix))]
+fn raise_fd_limit() {
+    // No-op on non-Unix platforms
 }
 
 #[tokio::main]
@@ -164,22 +173,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Start both listeners — they both run indefinitely
-    let socket_task = server::listener::start_server(Arc::clone(&config), Arc::clone(&index_manager));
+    // Start HTTP server (always available)
     let http_task = http::start_http_server(config, Arc::clone(&index_manager));
 
-    tokio::select! {
-        res_socket = socket_task => res_socket?,
-        res_http = http_task => res_http?,
-        _ = tokio::signal::ctrl_c() => {
-            log::info!("Shutdown signal received, dropping indexes and exiting...");
-            // Try to drop readers first (frees Fds); if the read lock is
-            // contended we just exit — the kernel reclaims everything.
-            if let Ok(mut mgr) = index_manager.try_write() {
-                mgr.shutdown();
+    #[cfg(unix)]
+    {
+        // Start Unix socket server on Unix platforms
+        let socket_task = server::listener::start_server(Arc::clone(&config), Arc::clone(&index_manager));
+
+        tokio::select! {
+            res_socket = socket_task => res_socket?,
+            res_http = http_task => res_http?,
+            _ = tokio::signal::ctrl_c() => {
+                log::info!("Shutdown signal received, dropping indexes and exiting...");
+                if let Ok(mut mgr) = index_manager.try_write() {
+                    mgr.shutdown();
+                }
+                log::info!("Goodbye.");
+                std::process::exit(0);
             }
-            log::info!("Goodbye.");
-            std::process::exit(0);
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // On non-Unix platforms, only HTTP server is available
+        tokio::select! {
+            res_http = http_task => res_http?,
+            _ = tokio::signal::ctrl_c() => {
+                log::info!("Shutdown signal received, dropping indexes and exiting...");
+                if let Ok(mut mgr) = index_manager.try_write() {
+                    mgr.shutdown();
+                }
+                log::info!("Goodbye.");
+                std::process::exit(0);
+            }
         }
     }
 

@@ -2,34 +2,18 @@
 
 This tutorial walks you from zero to a working search index in about ten minutes. By the end you will have:
 
-- Built and started the tantex server
+- Installed the tantex server
 - Created an index with a custom schema
 - Ingested a small batch of documents
 - Run a full-text search and read the results
 
-**Prerequisites:** Rust toolchain (≥ 1.75), `curl`, and `jq` (optional, for pretty-printing JSON).
+**Prerequisites:** `curl` and `jq` (optional, for pretty-printing JSON).
+
+> **New to tantex?** Start with [Installation](./installation.md) to download or build the binary.
 
 ---
 
-## 1. Build the server
-
-Clone the repository and compile a release binary:
-
-```sh
-git clone <repository-url> tantex
-cd tantex
-cargo build --release
-```
-
-The binary is placed at `target/release/tantex`. You can also run it in debug mode for development:
-
-```sh
-cargo run
-```
-
----
-
-## 2. Start the server
+## 1. Start the server
 
 ```sh
 ./target/release/tantex
@@ -50,7 +34,7 @@ The dashboard is available at [http://localhost:7200](http://localhost:7200).
 
 ---
 
-## 3. Create your first index
+## 2. Create your first index
 
 An index requires a **schema** — a list of fields with their types and options. Send a `POST` request to create one:
 
@@ -84,7 +68,7 @@ A successful response looks like:
 
 ---
 
-## 4. Ingest documents
+## 3. Ingest documents
 
 Use the JavaScript client to ingest documents:
 
@@ -141,7 +125,7 @@ See [JavaScript client](../how-to/javascript-client.md) for more examples (strea
 
 ---
 
-## 5. Run a search
+## 4. Run a search
 
 Once documents are ingested and committed, search them:
 
@@ -178,7 +162,7 @@ Response:
 
 ---
 
-## 6. Explore the dashboard
+## 5. Explore the dashboard
 
 Open [http://localhost:7200](http://localhost:7200) in your browser. You will see:
 

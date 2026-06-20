@@ -27,6 +27,7 @@ export default defineConfig({
                 {
                     text: 'Tutorial',
                     items: [
+                        { text: 'Installation', link: '/docs/tutorial/installation' },
                         { text: 'Getting started', link: '/docs/tutorial/getting-started' },
                     ],
                 },
