@@ -1,0 +1,15 @@
+<script setup>
+import { cn } from "@/lib/utils"
+
+const props = defineProps({ class: null })
+</script>
+
+<template>
+  <nav
+    aria-label="breadcrumb"
+    data-slot="breadcrumb"
+    :class="cn('', props.class)"
+  >
+    <slot />
+  </nav>
+</template>

@@ -1,0 +1,33 @@
+[package]
+name = "tantex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tantivy = { version = "0.22", features = ["lz4-compression", "zstd-compression"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rmp-serde = "1"
+memmap2 = "0.9"
+libc = "0.2"
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
+env_logger = "0.11"
+crossbeam-channel = "0.5"
+bytes = "1"
+rayon = "1"
+sonic-rs = "0.3"
+axum = { version = "0.8", features = ["macros", "ws"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+tokio-stream = "0.1"
+futures = "0.3"
+rust-embed = "8"
+mime_guess = "2"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

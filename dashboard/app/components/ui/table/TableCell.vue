@@ -1,0 +1,14 @@
+<script setup>
+import { cn } from "@/lib/utils"
+
+const props = defineProps({ class: null })
+</script>
+
+<template>
+  <td
+    data-slot="table-cell"
+    :class="cn('p-2 align-middle whitespace-nowrap [&:has([role=checkbox])]:pr-0', props.class)"
+  >
+    <slot />
+  </td>
+</template>

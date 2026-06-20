@@ -1,0 +1,12 @@
+data/
+scripts/
+target/
+.DS_Store
+Cargo.lock
+node_modules/
+.nuxt/
+.output/
+dist
+bun.lock
+.vitepress
+.claude/
