@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub socket_path: String,
     pub http_port: u16,
-    pub dashboard_dir: String,
     pub data_dir: String,
     pub shm_buffer_size: usize,
     pub writer_heap_size: usize,
@@ -72,9 +71,29 @@ impl Config {
             }
         }
 
-        // ── Layer 2: JSON config file (read from data_dir)
-        let config_path = Path::new(&cfg.data_dir).join("tantex.config.json");
-        if config_path.exists() {
+        // ── Layer 2: JSON config file
+        // First try binary directory, then fall back to data_dir
+        let mut config_path = None;
+
+        // Try <binary_dir>/tantex.config.json first
+        if let Ok(exe_path) = env::current_exe() {
+            if let Some(parent) = exe_path.parent() {
+                let binary_dir_config = parent.join("tantex.config.json");
+                if binary_dir_config.exists() {
+                    config_path = Some(binary_dir_config);
+                }
+            }
+        }
+
+        // Fall back to data_dir/tantex.config.json if not found in binary dir
+        if config_path.is_none() {
+            let data_dir_config = Path::new(&cfg.data_dir).join("tantex.config.json");
+            if data_dir_config.exists() {
+                config_path = Some(data_dir_config);
+            }
+        }
+
+        if let Some(config_path) = config_path {
             match std::fs::read_to_string(&config_path) {
                 Ok(contents) => match serde_json::from_str::<Config>(&contents) {
                     Ok(file_cfg) => {
@@ -85,12 +104,13 @@ impl Config {
                 },
                 Err(e) => log::warn!("Failed to read {}: {}", config_path.display(), e),
             }
+        } else {
+            log::info!("No config file found (checked binary dir and {}), using defaults", cfg.data_dir);
         }
 
         // ── Layer 3: env vars override
         if let Ok(v) = env::var("TANTEX_SOCKET_PATH") { cfg.socket_path = v; }
         if let Some(v) = env::var("TANTEX_HTTP_PORT").ok().and_then(|v| v.parse().ok()) { cfg.http_port = v; }
-        if let Ok(v) = env::var("TANTEX_DASHBOARD_DIR") { cfg.dashboard_dir = v; }
         if let Ok(v) = env::var("TANTEX_DATA_DIR") { cfg.data_dir = v; }
         if let Some(v) = env::var("TANTEX_SHM_BUFFER_SIZE").ok().and_then(|v| v.parse().ok()) { cfg.shm_buffer_size = v; }
         if let Some(v) = env::var("TANTEX_WRITER_HEAP_SIZE").ok().and_then(|v| v.parse().ok()) { cfg.writer_heap_size = v; }
@@ -145,7 +165,6 @@ impl Config {
                 eprintln!("  --port <N>                   HTTP server port (default: 7200)");
                 eprintln!("  --socket <PATH>              Unix socket path (default: /tmp/tantex.sock)");
                 eprintln!("  --data-dir <DIR>             Index storage directory (default: ./data)");
-                eprintln!("                               The config file is read from <DIR>/tantex.config.json");
                 eprintln!("  --api-key <KEY>              Protect the HTTP API and dashboard with this key");
                 eprintln!("  --threads <N>                Total indexing thread budget (default: 8)");
                 eprintln!("  --index-threads-pct <N>      % of threads for tantivy vs parse pool (default: 63)");
@@ -158,8 +177,8 @@ impl Config {
                 eprintln!("  --max-merge-factor <N>       Max segments merged in one pass (default: 10)");
                 eprintln!("  --min-segments <N>           Min segments before a merge (default: 2)");
                 eprintln!("  --help                       Show this help message\n");
-                eprintln!("All options can also be set via environment variables (TANTEX_*)");
-                eprintln!("or in <data-dir>/tantex.config.json.");
+                eprintln!("Config file search: <binary_dir>/tantex.config.json, then <data-dir>/tantex.config.json");
+                eprintln!("All options can also be set via environment variables (TANTEX_*).");
                 eprintln!("Priority: CLI flags > environment variables > config file > defaults\n");
                 eprintln!("Examples:");
                 eprintln!("  tantex --port 8080");
@@ -191,7 +210,6 @@ impl Config {
         Self {
             socket_path: "/tmp/tantex.sock".to_string(),
             http_port: 7200,
-            dashboard_dir: "./dashboard/.output/public".to_string(),
             data_dir: "./data".to_string(),
             shm_buffer_size: 256 * 1024 * 1024,
             // 4 GB heap → fewer segment flushes; matches the bench sweet spot.
