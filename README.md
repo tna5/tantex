@@ -29,7 +29,7 @@ Pre-built binaries for Linux and macOS are available on the [releases page](http
 | **HTTP REST API** | JSON endpoints, SSE metrics, works from any language |
 | **Embedded dashboard** | Live metrics, schema builder, search UI — no external frontend needed |
 | **API keys** | bcrypt-hashed authentication for external clients |
-| **Multiple transports** | HTTP, Unix socket, or high-throughput SHM ingest via mmap |
+| **Multiple transports** | HTTP, Unix socket, or high-throughput SHM ingest via mmap (Unix only) |
 
 <details>
 <summary>Development</summary>
