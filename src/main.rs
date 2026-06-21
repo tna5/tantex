@@ -174,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Start HTTP server (always available)
-    let http_task = http::start_http_server(config, Arc::clone(&index_manager));
+    let http_task = http::start_http_server(Arc::clone(&config), Arc::clone(&index_manager));
 
     #[cfg(unix)]
     {
