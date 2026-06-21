@@ -80,8 +80,8 @@ mkdir -p "$INSTALL_DIR/data"
 
 mv "$TEMP_DIR/tantex" "$INSTALL_DIR/tantex"
 
-# Write default config file
-cat > "$INSTALL_DIR/data/tantex.config.json" << 'EOF'
+# Write default config file (in the root installation directory, next to the binary)
+cat > "$INSTALL_DIR/tantex.config.json" << 'EOF'
 {
   "socket_path": "/tmp/tantex.sock",
   "http_port": 7200,
@@ -102,8 +102,8 @@ EOF
 # Print result
 printf "${GREEN}✓ Installed to ${BOLD}./$INSTALL_DIR${NC}\n\n"
 printf "  $INSTALL_DIR\n"
+printf "  ├── tantex.config.json\n"
 printf "  ├── data/\n"
-printf "  │   └── tantex.config.json\n"
 printf "  └── tantex\n"
 printf "\n"
 printf "Start the server:\n"
