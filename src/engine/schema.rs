@@ -68,6 +68,10 @@ pub fn build_schema(
     let mut field_map = HashMap::new();
 
     for field_def in &schema_def.fields {
+        if field_def.name.trim().is_empty() {
+            return Err("Field name cannot be empty".into());
+        }
+
         // Strip "array<…>" wrapper: "array<text>" → "text", "array<ip>" → "ip".
         let raw_type = field_def.field_type.as_str();
         let effective_type = if let Some(inner) = raw_type.strip_prefix("array<").and_then(|s| s.strip_suffix('>')) {
