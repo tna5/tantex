@@ -7,6 +7,7 @@ use tantivy::schema::{
 use tantivy::store::{Compressor, ZstdCompressor};
 use tantivy::IndexSettings;
 
+use crate::engine::query::subfield_internal_name;
 use crate::protocol::messages::{FieldDefinition, SchemaDefinition};
 
 /// Parse the user-supplied compression name into a tantivy Compressor.
@@ -61,6 +62,12 @@ pub fn build_index_settings(schema_def: &SchemaDefinition) -> Result<IndexSettin
 }
 
 /// Build a tantivy Schema and field name → Field mapping from our SchemaDefinition.
+///
+/// For json fields that carry `field_tokenizers`, the json field itself is stored
+/// but not indexed; instead one internal text field per path is added to the schema
+/// under the name `__sub__{json_field}__{path}`.  These internal fields are indexed
+/// with the specified tokenizer and are not stored (retrieval always uses the stored
+/// json field).
 pub fn build_schema(
     schema_def: &SchemaDefinition,
 ) -> Result<(Schema, HashMap<String, Field>), Box<dyn std::error::Error>> {
@@ -179,7 +186,9 @@ pub fn build_schema(
                 if field_def.stored {
                     opts = opts.set_stored();
                 }
-                if field_def.indexed {
+                // When field_tokenizers is set, the json field itself is not indexed;
+                // per-path internal text fields handle indexing instead.
+                if field_def.indexed && field_def.field_tokenizers.is_none() {
                     let indexing = TextFieldIndexing::default()
                         .set_tokenizer(&field_def.tokenizer)
                         .set_index_option(IndexRecordOption::WithFreqsAndPositions);
@@ -205,6 +214,23 @@ pub fn build_schema(
             }
         };
         field_map.insert(field_def.name.clone(), field);
+
+        // For json fields with per-path tokenizers, create internal text fields.
+        // These are indexed-only (not stored): values are read back from the stored json.
+        if effective_type == "json" {
+            if let Some(ref ft) = field_def.field_tokenizers {
+                for (path, tokenizer_name) in ft {
+                    let internal_name = subfield_internal_name(&field_def.name, path);
+                    let text_opts = TextOptions::default().set_indexing_options(
+                        TextFieldIndexing::default()
+                            .set_tokenizer(tokenizer_name)
+                            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                    );
+                    let sub_field = builder.add_text_field(&internal_name, text_opts);
+                    field_map.insert(internal_name, sub_field);
+                }
+            }
+        }
     }
 
     Ok((builder.build(), field_map))
@@ -212,14 +238,41 @@ pub fn build_schema(
 
 /// Reconstruct a SchemaDefinition from a tantivy Schema and the IndexSettings
 /// stored alongside it. Pass `None` for `settings` when only the fields matter.
+///
+/// Internal `__sub__*` fields are stripped; their per-path tokenizers are
+/// re-attached to the owning json field's `field_tokenizers` map.
 pub fn schema_to_definition(schema: &Schema, settings: Option<&IndexSettings>) -> SchemaDefinition {
     use tantivy::schema::FieldType;
+    use std::collections::BTreeMap;
 
+    // First pass: collect per-path tokenizers from internal sub-fields.
+    let mut json_ft: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    for (_, entry) in schema.fields() {
+        let name = entry.name();
+        if let Some(rest) = name.strip_prefix("__sub__") {
+            if let Some(sep) = rest.find("__") {
+                let json_field = &rest[..sep];
+                let path = &rest[sep + 2..];
+                let tokenizer = if let FieldType::Str(opts) = entry.field_type() {
+                    opts.get_indexing_options()
+                        .map(|i| i.tokenizer().to_string())
+                        .unwrap_or_else(|| "default".to_string())
+                } else {
+                    "default".to_string()
+                };
+                json_ft.entry(json_field.to_string()).or_default().insert(path.to_string(), tokenizer);
+            }
+        }
+    }
+
+    // Second pass: build the public field list, skipping internal fields.
     let mut fields = Vec::new();
-
-    for (field, field_entry) in schema.fields() {
-        let _ = field; // we use field_entry for everything
+    for (_, field_entry) in schema.fields() {
         let name = field_entry.name().to_string();
+        if name.starts_with("__sub__") {
+            continue;
+        }
+
         let (field_type, stored, indexed, fast, tokenizer) = match field_entry.field_type() {
             FieldType::Str(opts) => {
                 let stored = opts.is_stored();
@@ -285,6 +338,12 @@ pub fn schema_to_definition(schema: &Schema, settings: Option<&IndexSettings>) -
             _ => ("unknown".to_string(), false, false, false, "default".to_string()),
         };
 
+        let field_tokenizers = if field_type == "json" {
+            json_ft.remove(&name).filter(|m| !m.is_empty())
+        } else {
+            None
+        };
+
         fields.push(FieldDefinition {
             name,
             field_type,
@@ -292,6 +351,7 @@ pub fn schema_to_definition(schema: &Schema, settings: Option<&IndexSettings>) -
             indexed,
             fast,
             tokenizer,
+            field_tokenizers,
         });
     }
 

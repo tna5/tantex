@@ -7,12 +7,14 @@ use tantivy::query::QueryParser;
 use tantivy::schema::{Field, FieldType, OwnedValue, Schema};
 use tantivy::{DocAddress, IndexReader, ReloadPolicy, TantivyDocument};
 
+use crate::engine::query::rewrite_query;
 use crate::protocol::messages::{SearchHit, SearchResponse, SegmentInfo};
 
 pub struct SearchEngine {
     reader: IndexReader,
     schema: Schema,
     field_map: HashMap<String, Field>,
+    subfield_routes: HashMap<String, Field>,
     pub search_count: Arc<AtomicU64>,
     pub search_latency_us: Arc<AtomicU64>,
 }
@@ -22,6 +24,7 @@ impl SearchEngine {
         index: &tantivy::Index,
         schema: Schema,
         field_map: HashMap<String, Field>,
+        subfield_routes: HashMap<String, Field>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let reader = index
             .reader_builder()
@@ -31,6 +34,7 @@ impl SearchEngine {
             reader,
             schema,
             field_map,
+            subfield_routes,
             search_count: Arc::new(AtomicU64::new(0)),
             search_latency_us: Arc::new(AtomicU64::new(0)),
         })
@@ -45,20 +49,25 @@ impl SearchEngine {
         let t0 = Instant::now();
         let searcher = self.reader.searcher();
 
+        // Rewrite selector path queries to internal sub-field names.
+        let rewritten = rewrite_query(query_str, &self.subfield_routes);
+
+        // Default fields: text fields only, excluding internal sub-fields.
+        // Users who want to search a specific selector use the `selectors.X:` prefix
+        // which gets rewritten above.
         let default_fields: Vec<Field> = self
             .field_map
             .values()
             .filter(|f| {
-                matches!(
-                    self.schema.get_field_entry(**f).field_type(),
-                    FieldType::Str(_)
-                )
+                let entry = self.schema.get_field_entry(**f);
+                !entry.name().starts_with("__sub__")
+                    && matches!(entry.field_type(), FieldType::Str(_))
             })
             .copied()
             .collect();
 
         let query_parser = QueryParser::for_index(searcher.index(), default_fields);
-        let query = query_parser.parse_query(query_str)?;
+        let query = query_parser.parse_query(&rewritten)?;
 
         let (top_docs, total_count) =
             searcher.search(&query, &(TopDocs::with_limit(limit + offset), Count))?;
@@ -104,8 +113,13 @@ impl SearchEngine {
             if !field_entry.is_stored() {
                 continue;
             }
-
             let name = field_entry.name().to_string();
+            // Internal sub-fields are not stored, so this check is redundant,
+            // but guard anyway to keep the response clean.
+            if name.starts_with("__sub__") {
+                continue;
+            }
+
             let values: Vec<&OwnedValue> = doc.get_all(field).collect();
 
             if values.is_empty() {

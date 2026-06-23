@@ -15,6 +15,7 @@ use tantivy::query::QueryParser;
 use tantivy::schema::{Field, FieldType, OwnedValue, Schema};
 use tantivy::{IndexWriter, TantivyDocument};
 
+use crate::engine::query::rewrite_query;
 use crate::shm::buffer::ShmBuffer;
 
 /// Lightweight field descriptor pre-computed once per index, used in the hot parsing loop.
@@ -33,6 +34,9 @@ enum FieldKind {
 
 /// Pre-computed map: field name → (Field id, FieldKind).
 type FieldCache = HashMap<String, (Field, FieldKind)>;
+
+/// Map: "json_field.path" → internal text Field.  Empty when no sub-fields exist.
+type SubfieldRoutes = HashMap<String, Field>;
 
 fn build_field_cache(schema: &Schema, field_map: &HashMap<String, Field>) -> FieldCache {
     field_map
@@ -118,6 +122,7 @@ impl WriterHandle {
         index: tantivy::Index,
         schema: Schema,
         field_map: HashMap<String, Field>,
+        subfield_routes: SubfieldRoutes,
         config: WriterConfig,
     ) -> Self {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -129,7 +134,7 @@ impl WriterHandle {
         let raw_bytes = Arc::clone(&raw_bytes_ingested);
 
         let thread = std::thread::spawn(move || {
-            writer_loop(index, schema, field_map, config, rx, None, counter, ingested, raw_bytes);
+            writer_loop(index, schema, field_map, subfield_routes, config, rx, None, counter, ingested, raw_bytes);
         });
 
         Self {
@@ -145,6 +150,7 @@ impl WriterHandle {
         index: tantivy::Index,
         schema: Schema,
         field_map: HashMap<String, Field>,
+        subfield_routes: SubfieldRoutes,
         config: WriterConfig,
         merge_policy: M,
     ) -> Self {
@@ -158,7 +164,7 @@ impl WriterHandle {
         let boxed_policy: Box<dyn MergePolicy> = Box::new(merge_policy);
 
         let thread = std::thread::spawn(move || {
-            writer_loop(index, schema, field_map, config, rx, Some(boxed_policy), counter, ingested, raw_bytes);
+            writer_loop(index, schema, field_map, subfield_routes, config, rx, Some(boxed_policy), counter, ingested, raw_bytes);
         });
 
         Self {
@@ -270,16 +276,58 @@ fn fill_field_from_value(
     }
 }
 
+/// For a json field value `json_val`, add each routed sub-path value to the
+/// corresponding internal text field.  Routes are keyed as `"json_field.path"`.
+fn route_json_subfields(
+    doc: &mut TantivyDocument,
+    json_field_name: &str,
+    json_val: &serde_json::Value,
+    routes: &SubfieldRoutes,
+) {
+    if routes.is_empty() {
+        return;
+    }
+    let prefix = format!("{}.", json_field_name);
+    for (route_key, &sub_field) in routes {
+        if let Some(path) = route_key.strip_prefix(&prefix) {
+            if let Some(path_val) = json_val.get(path) {
+                add_text_values(doc, sub_field, path_val);
+            }
+        }
+    }
+}
+
+fn add_text_values(doc: &mut TantivyDocument, field: Field, val: &serde_json::Value) {
+    match val {
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                add_text_values(doc, field, item);
+            }
+        }
+        serde_json::Value::String(s) => {
+            doc.add_field_value(field, s.as_str());
+        }
+        serde_json::Value::Null => {}
+        _ => {
+            doc.add_field_value(field, val.to_string().as_str());
+        }
+    }
+}
+
 /// AddDocuments path: a serde_json::Value is already in hand.
 fn json_to_document(
     value: &serde_json::Value,
     field_cache: &FieldCache,
+    subfield_routes: &SubfieldRoutes,
 ) -> Result<TantivyDocument, String> {
     let obj = value.as_object().ok_or("Document must be a JSON object")?;
     let mut doc = TantivyDocument::new();
     for (key, val) in obj {
         if let Some((field, kind)) = field_cache.get(key) {
             fill_field_from_value(&mut doc, *field, kind, val);
+            if matches!(kind, FieldKind::Json) {
+                route_json_subfields(&mut doc, key, val, subfield_routes);
+            }
         }
     }
     Ok(doc)
@@ -292,6 +340,7 @@ fn json_to_document(
 /// possible (no escape sequences) — huge alloc win for big body strings.
 struct DocSeed<'a> {
     field_cache: &'a FieldCache,
+    subfield_routes: &'a SubfieldRoutes,
 }
 
 impl<'de, 'a> DeserializeSeed<'de> for DocSeed<'a> {
@@ -302,12 +351,14 @@ impl<'de, 'a> DeserializeSeed<'de> for DocSeed<'a> {
     {
         deserializer.deserialize_map(DocVisitor {
             field_cache: self.field_cache,
+            subfield_routes: self.subfield_routes,
         })
     }
 }
 
 struct DocVisitor<'a> {
     field_cache: &'a FieldCache,
+    subfield_routes: &'a SubfieldRoutes,
 }
 
 impl<'de, 'a> Visitor<'de> for DocVisitor<'a> {
@@ -325,11 +376,13 @@ impl<'de, 'a> Visitor<'de> for DocVisitor<'a> {
         while let Some(key) = map.next_key::<Cow<str>>()? {
             match self.field_cache.get(key.as_ref()) {
                 Some((field, kind)) => {
-                    // General path: parse as a serde_json Value so that
-                    // fill_field_from_value can handle arrays, Ip, and all
-                    // other types (including text) uniformly.
+                    // Parse as a serde_json Value so that fill_field_from_value
+                    // can handle arrays, Ip, and all other types uniformly.
                     let val: serde_json::Value = map.next_value()?;
                     fill_field_from_value(&mut doc, *field, kind, &val);
+                    if matches!(kind, FieldKind::Json) {
+                        route_json_subfields(&mut doc, key.as_ref(), &val, self.subfield_routes);
+                    }
                 }
                 None => {
                     // Unknown field — skip value entirely without allocating.
@@ -379,13 +432,14 @@ fn parse_and_index_line(
     line: &str,
     writer: &IndexWriter,
     field_cache: &FieldCache,
+    subfield_routes: &SubfieldRoutes,
 ) -> (u64, u64) {
     let line = line.trim();
     if line.is_empty() {
         return (0, 0);
     }
     let mut de = sonic_rs::Deserializer::from_str(line);
-    let doc = match (DocSeed { field_cache }).deserialize(&mut de) {
+    let doc = match (DocSeed { field_cache, subfield_routes }).deserialize(&mut de) {
         Ok(d) => d,
         Err(_) => return (0, 1),
     };
@@ -400,11 +454,12 @@ fn ingest_ndjson(
     text: &str,
     writer: &IndexWriter,
     field_cache: &FieldCache,
+    subfield_routes: &SubfieldRoutes,
     rayon_pool: &rayon::ThreadPool,
 ) -> (u64, u64) {
     rayon_pool.install(|| {
         text.par_lines()
-            .map(|line| parse_and_index_line(line, writer, field_cache))
+            .map(|line| parse_and_index_line(line, writer, field_cache, subfield_routes))
             .reduce(|| (0u64, 0u64), |a, b| (a.0 + b.0, a.1 + b.1))
     })
 }
@@ -414,12 +469,13 @@ fn ingest_values(
     documents: Vec<serde_json::Value>,
     writer: &IndexWriter,
     field_cache: &FieldCache,
+    subfield_routes: &SubfieldRoutes,
     rayon_pool: &rayon::ThreadPool,
 ) -> (u64, u64) {
     rayon_pool.install(|| {
         documents
             .into_par_iter()
-            .map(|val| match json_to_document(&val, field_cache) {
+            .map(|val| match json_to_document(&val, field_cache, subfield_routes) {
                 Ok(doc) => match writer.add_document(doc) {
                     Ok(_) => (1u64, 0u64),
                     Err(_) => (0, 1),
@@ -430,10 +486,12 @@ fn ingest_values(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn writer_loop(
     index: tantivy::Index,
     schema: Schema,
     field_map: HashMap<String, Field>,
+    subfield_routes: SubfieldRoutes,
     config: WriterConfig,
     rx: Receiver<WriterCommand>,
     merge_policy: Option<Box<dyn MergePolicy>>,
@@ -558,7 +616,7 @@ fn writer_loop(
                 let raw_bytes: u64 = documents.iter()
                     .map(|d| d.to_string().len() as u64 + 1)
                     .sum();
-                let (indexed, errors) = ingest_values(documents, &writer, &field_cache, &rayon_pool);
+                let (indexed, errors) = ingest_values(documents, &writer, &field_cache, &subfield_routes, &rayon_pool);
                 raw_bytes_ingested.fetch_add(raw_bytes, Ordering::Relaxed);
                 pending_docs.fetch_add(indexed, Ordering::Relaxed);
                 let new_total = total_docs_ingested.fetch_add(indexed, Ordering::Relaxed) + indexed;
@@ -591,7 +649,7 @@ fn writer_loop(
                 raw_bytes_ingested.fetch_add(shm_data.len() as u64, Ordering::Relaxed);
                 // SAFETY: content written by JS JSON.stringify — always valid UTF-8.
                 let text = unsafe { std::str::from_utf8_unchecked(&shm_data) };
-                let (indexed, errors) = ingest_ndjson(text, &writer, &field_cache, &rayon_pool);
+                let (indexed, errors) = ingest_ndjson(text, &writer, &field_cache, &subfield_routes, &rayon_pool);
                 pending_docs.fetch_add(indexed, Ordering::Relaxed);
                 let new_total = total_docs_ingested.fetch_add(indexed, Ordering::Relaxed) + indexed;
                 docs_since_commit += indexed as usize;
@@ -624,7 +682,7 @@ fn writer_loop(
                 let data = shm.read_slice(0, length);
                 // SAFETY: content written by JS JSON.stringify — always valid UTF-8.
                 let text = unsafe { std::str::from_utf8_unchecked(data) };
-                let (indexed, errors) = ingest_ndjson(text, &writer, &field_cache, &rayon_pool);
+                let (indexed, errors) = ingest_ndjson(text, &writer, &field_cache, &subfield_routes, &rayon_pool);
                 pending_docs.fetch_add(indexed, Ordering::Relaxed);
                 let new_total = total_docs_ingested.fetch_add(indexed, Ordering::Relaxed) + indexed;
                 docs_since_commit += indexed as usize;
@@ -664,12 +722,18 @@ fn writer_loop(
                 }
             },
             Ok(WriterCommand::DeleteByQuery { query_str, response }) => {
+                // Rewrite selector paths before parsing.
+                let rewritten = rewrite_query(&query_str, &subfield_routes);
                 let default_fields: Vec<tantivy::schema::Field> = field_cache
                     .values()
-                    .filter_map(|(field, kind)| matches!(kind, FieldKind::Text).then_some(*field))
+                    .filter_map(|(field, kind)| {
+                        if !matches!(kind, FieldKind::Text) { return None; }
+                        if schema.get_field_entry(*field).name().starts_with("__sub__") { return None; }
+                        Some(*field)
+                    })
                     .collect();
                 let query_parser = QueryParser::for_index(&index, default_fields);
-                match query_parser.parse_query(&query_str) {
+                match query_parser.parse_query(&rewritten) {
                     Ok(query) => match writer.delete_query(Box::new(query)) {
                         Ok(_) => match writer.commit() {
                             Ok(_) => {

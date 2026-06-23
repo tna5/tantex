@@ -21,6 +21,7 @@ Every field in a tantex schema has a `type` that determines how it is indexed, s
 | `indexed` | `true` | Whether the value is indexed for search/filtering. Set to `false` for store-only fields. |
 | `fast` | `false` | Whether to build a column-oriented index (docvalues). Required for sorting, aggregations, and range filters on numeric/date fields. |
 | `tokenizer` | `"default"` | Tokenizer to use. Only meaningful for `text`, `json`, `array<text>`, and `array<json>` fields. |
+| `field_tokenizers` | — | **`json` only.** Per-path tokenizer overrides. See [Per-path tokenizers for json](#per-path-tokenizers-for-json). |
 
 ---
 
@@ -40,9 +41,11 @@ Full-text indexed string. The value is tokenized before indexing.
 |---|---|
 | `default` | Lowercase + split on whitespace and punctuation |
 | `raw` | Index the entire value as a single token (exact match) |
+| `raw_lower` | Index the entire value as one token, lowercased — exact case-insensitive match |
 | `en_stem` | English stemming (`running` → `run`) |
 | `whitespace` | Split on whitespace only, no case folding |
 | `ngram` | Character n-grams (prefix/substring search) |
+| `sorted` | Word-splits, lowercases, sorts tokens alphabetically, then re-emits at positions 0…n. Phrase queries become order-independent: `"Jean Dupont"` matches `"Dupont Jean"`. Cross-element false positives are prevented by tantivy's per-value position gap. |
 
 ---
 
@@ -121,6 +124,30 @@ Semi-structured JSON object. All string leaf values are tokenized and indexed; n
 ```
 
 Query a nested key: `metadata.color:blue`.
+
+#### Per-path tokenizers for json
+
+When different sub-paths of a json field need different tokenizers — e.g. exact-match on emails but order-independent phrase search on full names — use `field_tokenizers` instead of a single `tokenizer`. Set `"indexed": false` on the json field itself; tantex creates one internal text field per declared path and routes values at ingest time.
+
+```json
+{
+  "name": "pii",
+  "type": "json",
+  "stored": true,
+  "indexed": false,
+  "field_tokenizers": {
+    "emails":    "raw_lower",
+    "fullnames": "sorted",
+    "tags":      "default"
+  }
+}
+```
+
+At query time, `pii.emails:"foo@bar.com"` is **automatically rewritten** to the internal field name before parsing — callers use the natural `field.path:value` syntax unchanged.
+
+Internally tantex creates fields named `__sub__pii__emails`, `__sub__pii__fullnames`, etc. These are indexed-only (not stored); the stored json field is used for retrieval. Internal field names are never exposed in search results.
+
+Available tokenizers for `field_tokenizers`: same set as for `text` fields (`default`, `raw`, `raw_lower`, `sorted`, `en_stem`, `whitespace`, `ngram`).
 
 ---
 

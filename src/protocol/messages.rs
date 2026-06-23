@@ -31,6 +31,11 @@ pub struct FieldDefinition {
     pub fast: bool,
     #[serde(default = "default_tokenizer")]
     pub tokenizer: String,
+    /// For json fields: per-path tokenizer overrides.  Key = sub-path inside
+    /// the json object, value = tokenizer name registered on the index.
+    /// Drives creation of internal `__sub__{field}__{path}` text fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_tokenizers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 fn default_true() -> bool {

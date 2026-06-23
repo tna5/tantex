@@ -8,8 +8,10 @@ use std::sync::atomic::Ordering;
 
 use crate::config::Config;
 use crate::engine::merge_policy::TargetDocCountMergePolicy;
+use crate::engine::query::subfield_routes_from_field_map;
 use crate::engine::schema::{build_index_settings, build_schema, schema_to_definition};
 use crate::engine::searcher::SearchEngine;
+use crate::engine::tokenizers::register_custom_tokenizers;
 use crate::engine::writer::{WriterConfig, WriterHandle};
 use crate::protocol::messages::{
     CreateIndexResponse, DeleteIndexResponse, GetIndexResponse, GetSegmentsResponse, IndexInfo,
@@ -21,6 +23,7 @@ pub struct ManagedIndex {
     pub schema: Schema,
     pub schema_def: SchemaDefinition,
     pub field_map: HashMap<String, Field>,
+    pub subfield_routes: HashMap<String, Field>,
     pub index: Index,
     pub writer: WriterHandle,
     pub searcher: SearchEngine,
@@ -83,13 +86,20 @@ impl IndexManager {
         path: &PathBuf,
     ) -> Result<ManagedIndex, Box<dyn std::error::Error>> {
         let index = Index::open_in_dir(path)?;
+
+        // Register custom tokenizers BEFORE creating writer/reader so the
+        // schema's tokenizer references resolve at open time.
+        register_custom_tokenizers(&index);
+
         let schema = index.schema();
 
-        // Reconstruct field map from schema
+        // Reconstruct field map from schema (includes internal __sub__ fields).
         let mut field_map = HashMap::new();
         for (field, field_entry) in schema.fields() {
             field_map.insert(field_entry.name().to_string(), field);
         }
+
+        let sub_routes = subfield_routes_from_field_map(&field_map);
 
         let index_settings = index.settings().clone();
         let schema_def = schema_to_definition(&schema, Some(&index_settings));
@@ -110,16 +120,18 @@ impl IndexManager {
             index.clone(),
             schema.clone(),
             field_map.clone(),
+            sub_routes.clone(),
             writer_config,
         );
 
-        let searcher = SearchEngine::new(&index, schema.clone(), field_map.clone())?;
+        let searcher = SearchEngine::new(&index, schema.clone(), field_map.clone(), sub_routes.clone())?;
 
         Ok(ManagedIndex {
             name: name.to_string(),
             schema,
             schema_def,
             field_map,
+            subfield_routes: sub_routes,
             index,
             writer,
             searcher,
@@ -148,13 +160,19 @@ impl IndexManager {
             .settings(index_settings.clone())
             .create_in_dir(&index_path)?;
 
+        // Register custom tokenizers BEFORE spawning writer/reader.
+        register_custom_tokenizers(&index);
+
+        let sub_routes = subfield_routes_from_field_map(&field_map);
+
         // Re-materialise the schema definition so the response reports the
         // effective settings (including defaults filled in by tantivy).
         let schema_def = schema_to_definition(&schema, Some(&index_settings));
 
-        // Build field_ids for the response
+        // Build field_ids for the response (excludes internal fields from count).
         let field_ids: HashMap<String, u32> = field_map
             .iter()
+            .filter(|(name, _)| !name.starts_with("__sub__"))
             .map(|(name, field)| (name.clone(), field.field_id()))
             .collect();
 
@@ -174,20 +192,18 @@ impl IndexManager {
             index.clone(),
             schema.clone(),
             field_map.clone(),
+            sub_routes.clone(),
             writer_config,
         );
 
-        // Set merge policy via a commit command on the writer
-        // Actually, we set the merge policy on the index writer inside the spawn.
-        // Let's do it differently: set the merge policy before spawning.
-        // We need to adjust spawn to accept the merge policy. For now, let's
-        // set it by recreating the writer with merge policy.
+        // Restart with the custom merge policy.
         writer.shutdown();
 
         let writer = WriterHandle::spawn_with_merge_policy(
             index.clone(),
             schema.clone(),
             field_map.clone(),
+            sub_routes.clone(),
             WriterConfig {
                 heap_size: self.config.writer_heap_size,
                 num_threads: self.config.num_indexing_threads,
@@ -206,13 +222,14 @@ impl IndexManager {
             },
         );
 
-        let searcher = SearchEngine::new(&index, schema.clone(), field_map.clone())?;
+        let searcher = SearchEngine::new(&index, schema.clone(), field_map.clone(), sub_routes.clone())?;
 
         let managed = ManagedIndex {
             name: name.to_string(),
             schema,
             schema_def,
             field_map,
+            subfield_routes: sub_routes,
             index,
             writer,
             searcher,
