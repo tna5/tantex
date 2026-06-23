@@ -21,8 +21,25 @@ pub const MSG_RESPONSE_ERR: u8 = 0x81;
 /// Definition for a sub-path inside a `json` field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubFieldDef {
+    /// Field type. Supports: "text" (default), "u64", "i64", "f64", "date", "bool", "ip".
+    #[serde(rename = "type", default = "default_sub_field_type")]
+    pub field_type: String,
+    /// Tokenizer name. Only meaningful for type="text".
     #[serde(default = "default_tokenizer")]
     pub tokenizer: String,
+    /// Store the value in the doc store. Default false (parent json field stores it).
+    #[serde(default)]
+    pub stored: bool,
+    /// Index the value for search/filtering. Default true.
+    #[serde(default = "default_true")]
+    pub indexed: bool,
+    /// Build column-oriented docvalues. Required for range filters and sorting. Default false.
+    #[serde(default)]
+    pub fast: bool,
+}
+
+fn default_sub_field_type() -> String {
+    "text".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

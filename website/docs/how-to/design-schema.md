@@ -65,7 +65,7 @@ Fast fields increase index size and slow down ingest slightly. Only enable them 
 
 ## Per-path field mapping for `json` fields
 
-When sub-paths of a json field need different tokenizers, use `fields` with `"indexed": false` on the json field itself. Tantex creates one internal text field per declared path and routes values during ingest. Queries on `field.path:value` are rewritten transparently.
+When sub-paths of a json field need individual control over type, tokenizer, or indexing, use `fields` with `"indexed": false` on the json field itself. Tantex creates one internal field per declared path and routes values during ingest. Queries on `field.path:value` are rewritten transparently.
 
 ```json
 {
@@ -74,18 +74,20 @@ When sub-paths of a json field need different tokenizers, use `fields` with `"in
   "stored": true,
   "indexed": false,
   "fields": {
-    "service": { "tokenizer": "raw" },
-    "host":    { "tokenizer": "raw" },
-    "message": { "tokenizer": "default" }
+    "service":     { "type": "text", "tokenizer": "raw" },
+    "host":        { "type": "text", "tokenizer": "raw" },
+    "status_code": { "type": "u64",  "indexed": true, "fast": true },
+    "message":     { "type": "text", "tokenizer": "default" }
   }
 }
 ```
 
 - `extra.service:nginx` — exact match on service name
 - `extra.host:web-01` — exact match on hostname
+- `extra.status_code:[500 TO *]` — range filter on numeric status code
 - `extra.message:"connection refused"` — full-text search in log message
 
-See [Per-path field mapping for json](../reference/field-types.md#per-path-field-mapping-for-json) for the internal mechanism.
+See [Per-path field mapping for json](../reference/field-types.md#per-path-field-mapping-for-json) for the full sub-field property reference.
 
 ---
 

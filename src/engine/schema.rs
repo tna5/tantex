@@ -182,20 +182,27 @@ pub fn build_schema(
                 builder.add_bytes_field(&field_def.name, opts)
             }
             "json" => {
-                // Resolve per-path tokenizer map: `fields` takes precedence over `field_tokenizers`.
-                let resolved: Option<std::collections::BTreeMap<String, String>> =
+                // Resolve sub-field map: `fields` takes precedence over `field_tokenizers`.
+                let resolved: Option<std::collections::BTreeMap<String, SubFieldDef>> =
                     if let Some(ref f) = field_def.fields {
-                        Some(f.iter().map(|(k, v)| (k.clone(), v.tokenizer.clone())).collect())
+                        Some(f.clone())
+                    } else if let Some(ref ft) = field_def.field_tokenizers {
+                        Some(ft.iter().map(|(k, tok)| (k.clone(), SubFieldDef {
+                            field_type: "text".to_string(),
+                            tokenizer: tok.clone(),
+                            stored: false,
+                            indexed: true,
+                            fast: false,
+                        })).collect())
                     } else {
-                        field_def.field_tokenizers.clone()
+                        None
                     };
 
                 let mut opts = JsonObjectOptions::default();
                 if field_def.stored {
                     opts = opts.set_stored();
                 }
-                // When per-path sub-fields are declared, the json field itself is not indexed;
-                // internal text fields per path handle indexing instead.
+                // When per-path sub-fields are declared, the json field itself is not indexed.
                 if field_def.indexed && resolved.is_none() {
                     let indexing = TextFieldIndexing::default()
                         .set_tokenizer(&field_def.tokenizer)
@@ -205,20 +212,74 @@ pub fn build_schema(
                 let json_field = builder.add_json_field(&field_def.name, opts);
                 field_map.insert(field_def.name.clone(), json_field);
 
-                // Create internal text fields for each declared sub-path.
+                // Create one internal field per declared sub-path.
                 if let Some(ref ft) = resolved {
-                    for (path, tokenizer_name) in ft {
+                    for (path, sub_def) in ft {
                         let internal_name = subfield_internal_name(&field_def.name, path);
-                        let text_opts = TextOptions::default().set_indexing_options(
-                            TextFieldIndexing::default()
-                                .set_tokenizer(tokenizer_name)
-                                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
-                        );
-                        let sub_field = builder.add_text_field(&internal_name, text_opts);
+                        let sub_field = match sub_def.field_type.as_str() {
+                            "text" => {
+                                let mut text_opts = TextOptions::default();
+                                if sub_def.stored { text_opts = text_opts.set_stored(); }
+                                if sub_def.indexed {
+                                    text_opts = text_opts.set_indexing_options(
+                                        TextFieldIndexing::default()
+                                            .set_tokenizer(&sub_def.tokenizer)
+                                            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                                    );
+                                }
+                                if sub_def.fast { text_opts = text_opts.set_fast(None); }
+                                builder.add_text_field(&internal_name, text_opts)
+                            }
+                            "u64" => {
+                                let mut n = NumericOptions::default();
+                                if sub_def.stored { n = n.set_stored(); }
+                                if sub_def.indexed { n = n.set_indexed(); }
+                                if sub_def.fast { n = n.set_fast(); }
+                                builder.add_u64_field(&internal_name, n)
+                            }
+                            "i64" => {
+                                let mut n = NumericOptions::default();
+                                if sub_def.stored { n = n.set_stored(); }
+                                if sub_def.indexed { n = n.set_indexed(); }
+                                if sub_def.fast { n = n.set_fast(); }
+                                builder.add_i64_field(&internal_name, n)
+                            }
+                            "f64" => {
+                                let mut n = NumericOptions::default();
+                                if sub_def.stored { n = n.set_stored(); }
+                                if sub_def.indexed { n = n.set_indexed(); }
+                                if sub_def.fast { n = n.set_fast(); }
+                                builder.add_f64_field(&internal_name, n)
+                            }
+                            "date" => {
+                                let mut d = DateOptions::default();
+                                if sub_def.stored { d = d.set_stored(); }
+                                if sub_def.indexed { d = d.set_indexed(); }
+                                if sub_def.fast { d = d.set_fast(); }
+                                builder.add_date_field(&internal_name, d)
+                            }
+                            "bool" => {
+                                let mut n = NumericOptions::default();
+                                if sub_def.stored { n = n.set_stored(); }
+                                if sub_def.indexed { n = n.set_indexed(); }
+                                if sub_def.fast { n = n.set_fast(); }
+                                builder.add_bool_field(&internal_name, n)
+                            }
+                            "ip" => {
+                                let mut ip = IpAddrOptions::default();
+                                if sub_def.stored { ip = ip.set_stored(); }
+                                if sub_def.indexed { ip = ip.set_indexed(); }
+                                if sub_def.fast { ip = ip.set_fast(); }
+                                builder.add_ip_addr_field(&internal_name, ip)
+                            }
+                            other => return Err(format!(
+                                "Unknown sub-field type '{}' on field '{}' path '{}'",
+                                other, field_def.name, path
+                            ).into()),
+                        };
                         field_map.insert(internal_name, sub_field);
                     }
                 }
-                // Skip the json field insert below and the legacy block — already handled.
                 continue;
             }
             "ip" => {
@@ -247,28 +308,57 @@ pub fn build_schema(
 /// Reconstruct a SchemaDefinition from a tantivy Schema and the IndexSettings
 /// stored alongside it. Pass `None` for `settings` when only the fields matter.
 ///
-/// Internal `__sub__*` fields are stripped; their per-path tokenizers are
-/// re-attached to the owning json field's `field_tokenizers` map.
+/// Internal `__sub__*` fields are stripped; their definitions are re-attached
+/// to the owning json field's `fields` map.
 pub fn schema_to_definition(schema: &Schema, settings: Option<&IndexSettings>) -> SchemaDefinition {
     use tantivy::schema::FieldType;
     use std::collections::BTreeMap;
 
-    // First pass: collect per-path tokenizers from internal sub-fields.
-    let mut json_ft: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+    // First pass: collect sub-field definitions from internal __sub__ fields.
+    let mut json_ft: HashMap<String, BTreeMap<String, SubFieldDef>> = HashMap::new();
     for (_, entry) in schema.fields() {
         let name = entry.name();
         if let Some(rest) = name.strip_prefix("__sub__") {
             if let Some(sep) = rest.find("__") {
                 let json_field = &rest[..sep];
                 let path = &rest[sep + 2..];
-                let tokenizer = if let FieldType::Str(opts) = entry.field_type() {
-                    opts.get_indexing_options()
-                        .map(|i| i.tokenizer().to_string())
-                        .unwrap_or_else(|| "default".to_string())
-                } else {
-                    "default".to_string()
+                let sub_def = match entry.field_type() {
+                    FieldType::Str(opts) => SubFieldDef {
+                        field_type: "text".to_string(),
+                        tokenizer: opts.get_indexing_options()
+                            .map(|i| i.tokenizer().to_string())
+                            .unwrap_or_else(|| "default".to_string()),
+                        stored: opts.is_stored(),
+                        indexed: opts.get_indexing_options().is_some(),
+                        fast: opts.is_fast(),
+                    },
+                    FieldType::U64(opts) => SubFieldDef {
+                        field_type: "u64".to_string(), tokenizer: "default".to_string(),
+                        stored: opts.is_stored(), indexed: opts.is_indexed(), fast: opts.is_fast(),
+                    },
+                    FieldType::I64(opts) => SubFieldDef {
+                        field_type: "i64".to_string(), tokenizer: "default".to_string(),
+                        stored: opts.is_stored(), indexed: opts.is_indexed(), fast: opts.is_fast(),
+                    },
+                    FieldType::F64(opts) => SubFieldDef {
+                        field_type: "f64".to_string(), tokenizer: "default".to_string(),
+                        stored: opts.is_stored(), indexed: opts.is_indexed(), fast: opts.is_fast(),
+                    },
+                    FieldType::Date(opts) => SubFieldDef {
+                        field_type: "date".to_string(), tokenizer: "default".to_string(),
+                        stored: opts.is_stored(), indexed: opts.is_indexed(), fast: opts.is_fast(),
+                    },
+                    FieldType::Bool(opts) => SubFieldDef {
+                        field_type: "bool".to_string(), tokenizer: "default".to_string(),
+                        stored: opts.is_stored(), indexed: opts.is_indexed(), fast: opts.is_fast(),
+                    },
+                    FieldType::IpAddr(opts) => SubFieldDef {
+                        field_type: "ip".to_string(), tokenizer: "default".to_string(),
+                        stored: opts.is_stored(), indexed: opts.is_indexed(), fast: opts.is_fast(),
+                    },
+                    _ => continue,
                 };
-                json_ft.entry(json_field.to_string()).or_default().insert(path.to_string(), tokenizer);
+                json_ft.entry(json_field.to_string()).or_default().insert(path.to_string(), sub_def);
             }
         }
     }
@@ -347,11 +437,7 @@ pub fn schema_to_definition(schema: &Schema, settings: Option<&IndexSettings>) -
         };
 
         let fields_map = if field_type == "json" {
-            json_ft.remove(&name).filter(|m| !m.is_empty()).map(|m| {
-                m.into_iter()
-                    .map(|(path, tok)| (path, SubFieldDef { tokenizer: tok }))
-                    .collect::<std::collections::BTreeMap<_, _>>()
-            })
+            json_ft.remove(&name).filter(|m| !m.is_empty())
         } else {
             None
         };

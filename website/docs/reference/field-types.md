@@ -21,8 +21,7 @@ Every field in a tantex schema has a `type` that determines how it is indexed, s
 | `indexed` | `true` | Whether the value is indexed for search/filtering. Set to `false` for store-only fields. |
 | `fast` | `false` | Whether to build a column-oriented index (docvalues). Required for sorting, aggregations, and range filters on numeric/date fields. |
 | `tokenizer` | `"default"` | Tokenizer to use. Only meaningful for `text`, `json`, `array<text>`, and `array<json>` fields. |
-| `fields` | — | **`json` only.** Per-path sub-field definitions. Each key is a sub-path; value is `{ "tokenizer": "..." }`. See [Per-path field mapping for json](#per-path-field-mapping-for-json). |
-| `field_tokenizers` | — | **`json` only, deprecated.** Legacy shorthand for per-path tokenizers (`{ "path": "tokenizer" }`). Use `fields` instead. Accepted for backward compatibility. |
+| `fields` | — | **`json` only.** Per-path sub-field definitions. Each key is a sub-path; value is a sub-field definition with `type`, `tokenizer`, `stored`, `indexed`, `fast`. See [Per-path field mapping for json](#per-path-field-mapping-for-json). |
 
 ---
 
@@ -128,7 +127,17 @@ Query a nested key: `metadata.color:blue`.
 
 #### Per-path field mapping for json
 
-When different sub-paths of a json field need different tokenizers — e.g. exact-match on a service name but full-text search on a log message — use `fields` instead of a single `tokenizer`. Set `"indexed": false` on the json field itself; tantex creates one internal text field per declared path and routes values at ingest time.
+When sub-paths of a json field need individual control over type, tokenizer, or indexing, use `fields` instead of a single `tokenizer`. Set `"indexed": false` on the json field itself; tantex creates one internal field per declared path and routes values at ingest time.
+
+Each entry in `fields` is a sub-field definition with the following properties (all optional):
+
+| Property | Default | Description |
+|---|---|---|
+| `type` | `"text"` | Field type: `text`, `u64`, `i64`, `f64`, `date`, `bool`, `ip` |
+| `tokenizer` | `"default"` | Tokenizer name. Only meaningful for `type: "text"`. |
+| `stored` | `false` | Store the sub-field value separately. Parent json field usually holds it. |
+| `indexed` | `true` | Index the value for search/filtering. |
+| `fast` | `false` | Build docvalues. Required for range filters and sorting on numeric/date sub-fields. |
 
 ```json
 {
@@ -137,26 +146,24 @@ When different sub-paths of a json field need different tokenizers — e.g. exac
   "stored": true,
   "indexed": false,
   "fields": {
-    "service": { "tokenizer": "raw" },
-    "host":    { "tokenizer": "raw" },
-    "message": { "tokenizer": "default" }
+    "service":     { "type": "text", "tokenizer": "raw" },
+    "host":        { "type": "text", "tokenizer": "raw" },
+    "status_code": { "type": "u64",  "indexed": true, "fast": true },
+    "message":     { "type": "text", "tokenizer": "default" }
   }
 }
 ```
 
-At query time, `extra.service:nginx` is **automatically rewritten** to the internal field name before parsing — callers use the natural `field.path:value` syntax unchanged.
+At query time, paths are **automatically rewritten** to the internal field names — callers use the natural `field.path:value` syntax unchanged:
 
 ```
 extra.service:nginx
 extra.host:web-01
+extra.status_code:[500 TO *]
 extra.message:"connection refused"
 ```
 
-Internally tantex creates indexed-only fields (not stored) for each declared path. The stored json field is used for retrieval. Internal field names are never exposed in search results.
-
-Available tokenizers for sub-fields: same set as for `text` fields (`default`, `raw`, `raw_lower`, `sorted`, `en_stem`, `whitespace`, `ngram`).
-
-The legacy `field_tokenizers: { "path": "tokenizer" }` shorthand is still accepted for backward compatibility.
+Internally tantex creates one field per declared path (not stored by default). The stored json field is used for document retrieval. Internal field names are never exposed in search results.
 
 ---
 

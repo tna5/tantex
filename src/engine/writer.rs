@@ -15,7 +15,7 @@ use tantivy::query::QueryParser;
 use tantivy::schema::{Field, FieldType, OwnedValue, Schema};
 use tantivy::{IndexWriter, TantivyDocument};
 
-use crate::engine::query::rewrite_query;
+use crate::engine::query::{rewrite_query, subfield_internal_name};
 use crate::shm::buffer::ShmBuffer;
 
 /// Lightweight field descriptor pre-computed once per index, used in the hot parsing loop.
@@ -276,43 +276,31 @@ fn fill_field_from_value(
     }
 }
 
-/// For a json field value `json_val`, add each routed sub-path value to the
-/// corresponding internal text field.  Routes are keyed as `"json_field.path"`.
+/// For a json field value `json_val`, add each routed sub-path value to its
+/// internal field, using the correct field type from `field_cache`.
 fn route_json_subfields(
     doc: &mut TantivyDocument,
     json_field_name: &str,
     json_val: &serde_json::Value,
     routes: &SubfieldRoutes,
+    field_cache: &FieldCache,
 ) {
     if routes.is_empty() {
         return;
     }
     let prefix = format!("{}.", json_field_name);
-    for (route_key, &sub_field) in routes {
+    for route_key in routes.keys() {
         if let Some(path) = route_key.strip_prefix(&prefix) {
             if let Some(path_val) = json_val.get(path) {
-                add_text_values(doc, sub_field, path_val);
+                let internal = subfield_internal_name(json_field_name, path);
+                if let Some((sub_field, kind)) = field_cache.get(&internal) {
+                    fill_field_from_value(doc, *sub_field, kind, path_val);
+                }
             }
         }
     }
 }
 
-fn add_text_values(doc: &mut TantivyDocument, field: Field, val: &serde_json::Value) {
-    match val {
-        serde_json::Value::Array(arr) => {
-            for item in arr {
-                add_text_values(doc, field, item);
-            }
-        }
-        serde_json::Value::String(s) => {
-            doc.add_field_value(field, s.as_str());
-        }
-        serde_json::Value::Null => {}
-        _ => {
-            doc.add_field_value(field, val.to_string().as_str());
-        }
-    }
-}
 
 /// AddDocuments path: a serde_json::Value is already in hand.
 fn json_to_document(
@@ -326,7 +314,7 @@ fn json_to_document(
         if let Some((field, kind)) = field_cache.get(key) {
             fill_field_from_value(&mut doc, *field, kind, val);
             if matches!(kind, FieldKind::Json) {
-                route_json_subfields(&mut doc, key, val, subfield_routes);
+                route_json_subfields(&mut doc, key, val, subfield_routes, field_cache);
             }
         }
     }
@@ -381,7 +369,7 @@ impl<'de, 'a> Visitor<'de> for DocVisitor<'a> {
                     let val: serde_json::Value = map.next_value()?;
                     fill_field_from_value(&mut doc, *field, kind, &val);
                     if matches!(kind, FieldKind::Json) {
-                        route_json_subfields(&mut doc, key.as_ref(), &val, self.subfield_routes);
+                        route_json_subfields(&mut doc, key.as_ref(), &val, self.subfield_routes, self.field_cache);
                     }
                 }
                 None => {
