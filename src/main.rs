@@ -116,6 +116,46 @@ fn log_startup(c: &Config) {
     eprintln!();
 }
 
+fn run_upgrade() {
+    let install_url = "https://raw.githubusercontent.com/tna5/tantex/main/install.sh";
+
+    let has_curl = std::process::Command::new("curl")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let has_wget = std::process::Command::new("wget")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let sh_cmd = if has_curl {
+        format!("curl -fsSL '{}' | sh", install_url)
+    } else if has_wget {
+        format!("wget -qO- '{}' | sh", install_url)
+    } else {
+        eprintln!("Error: neither curl nor wget found");
+        std::process::exit(1);
+    };
+
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&sh_cmd)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("Error running install script: {}", e);
+            std::process::exit(1);
+        });
+
+    std::process::exit(status.code().unwrap_or(1));
+}
+
 /// Raise the soft `RLIMIT_NOFILE` to the hard limit (capped at 65536).
 /// Prevents "Too many open files" errors when many indexes/segments are loaded.
 #[cfg(unix)]
@@ -146,10 +186,22 @@ fn raise_fd_limit() {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("tantex {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    if args.iter().any(|a| a == "--upgrade") {
+        run_upgrade();
+        return Ok(());
+    }
+
     init_logger();
     raise_fd_limit();
 
-    let save_metrics = std::env::args().any(|a| a == "--save-metrics");
+    let save_metrics = args.iter().any(|a| a == "--save-metrics");
 
     let config = Config::from_env();
     log_startup(&config);

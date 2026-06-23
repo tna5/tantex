@@ -176,6 +176,8 @@ impl Config {
                 eprintln!("  --merge-target-docs <N>      Target segment size for merges (default: 20000000)");
                 eprintln!("  --max-merge-factor <N>       Max segments merged in one pass (default: 10)");
                 eprintln!("  --min-segments <N>           Min segments before a merge (default: 2)");
+                eprintln!("  --version, -V                Print the current version and exit");
+                eprintln!("  --upgrade                    Download and install the latest release");
                 eprintln!("  --help                       Show this help message\n");
                 eprintln!("Config file search: <binary_dir>/tantex.config.json, then <data-dir>/tantex.config.json");
                 eprintln!("All options can also be set via environment variables (TANTEX_*).");
