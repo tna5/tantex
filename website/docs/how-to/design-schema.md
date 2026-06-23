@@ -53,7 +53,7 @@ Fast fields increase index size and slow down ingest slightly. Only enable them 
 |---|---|
 | `default` | General-purpose full-text search on natural language |
 | `raw` | Exact-match on structured values (categories, slugs, identifiers) |
-| `raw_lower` | Exact case-insensitive match (emails, usernames) |
+| `raw_lower` | Exact case-insensitive match (hostnames, log levels) |
 | `sorted` | Name/phrase search where word order doesn't matter (`"Jean Dupont"` = `"Dupont Jean"`) |
 | `en_stem` | English text where you want `running` to match `run` |
 | `whitespace` | Tokenise by space only, preserve casing |
@@ -63,29 +63,29 @@ Fast fields increase index size and slow down ingest slightly. Only enable them 
 
 ---
 
-## Per-path tokenizers for `json` fields
+## Per-path field mapping for `json` fields
 
-When sub-paths of a json field need different tokenizers, use `field_tokenizers` with `"indexed": false` on the json field itself. Tantex creates one internal text field per declared path and routes values during ingest. Queries on `field.path:value` are rewritten transparently.
+When sub-paths of a json field need different tokenizers, use `fields` with `"indexed": false` on the json field itself. Tantex creates one internal text field per declared path and routes values during ingest. Queries on `field.path:value` are rewritten transparently.
 
 ```json
 {
-  "name": "person",
+  "name": "extra",
   "type": "json",
   "stored": true,
   "indexed": false,
-  "field_tokenizers": {
-    "email":    "raw_lower",
-    "fullname": "sorted",
-    "bio":      "default"
+  "fields": {
+    "service": { "tokenizer": "raw" },
+    "host":    { "tokenizer": "raw" },
+    "message": { "tokenizer": "default" }
   }
 }
 ```
 
-- `person.email:"alice@example.com"` — exact case-insensitive match
-- `person.fullname:"Dupont Jean"` — phrase match, order-independent
-- `person.bio:"engineer"` — full-text match
+- `extra.service:nginx` — exact match on service name
+- `extra.host:web-01` — exact match on hostname
+- `extra.message:"connection refused"` — full-text search in log message
 
-See [Per-path tokenizers for json](../reference/field-types.md#per-path-tokenizers-for-json) for the internal mechanism.
+See [Per-path field mapping for json](../reference/field-types.md#per-path-field-mapping-for-json) for the internal mechanism.
 
 ---
 

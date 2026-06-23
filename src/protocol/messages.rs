@@ -18,6 +18,13 @@ pub const MSG_SET_CONFIG: u8 = 0x31;
 pub const MSG_RESPONSE_OK: u8 = 0x80;
 pub const MSG_RESPONSE_ERR: u8 = 0x81;
 
+/// Definition for a sub-path inside a `json` field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubFieldDef {
+    #[serde(default = "default_tokenizer")]
+    pub tokenizer: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldDefinition {
     pub name: String,
@@ -31,9 +38,13 @@ pub struct FieldDefinition {
     pub fast: bool,
     #[serde(default = "default_tokenizer")]
     pub tokenizer: String,
-    /// For json fields: per-path tokenizer overrides.  Key = sub-path inside
-    /// the json object, value = tokenizer name registered on the index.
-    /// Drives creation of internal `__sub__{field}__{path}` text fields.
+    /// For json fields: per-path sub-field definitions (preferred API).
+    /// Key = sub-path inside the json object, value = SubFieldDef.
+    /// Takes precedence over `field_tokenizers` when both are present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<std::collections::BTreeMap<String, SubFieldDef>>,
+    /// For json fields: per-path tokenizer overrides (legacy shorthand).
+    /// Use `fields` instead. Accepted for backward compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field_tokenizers: Option<std::collections::BTreeMap<String, String>>,
 }

@@ -21,7 +21,8 @@ Every field in a tantex schema has a `type` that determines how it is indexed, s
 | `indexed` | `true` | Whether the value is indexed for search/filtering. Set to `false` for store-only fields. |
 | `fast` | `false` | Whether to build a column-oriented index (docvalues). Required for sorting, aggregations, and range filters on numeric/date fields. |
 | `tokenizer` | `"default"` | Tokenizer to use. Only meaningful for `text`, `json`, `array<text>`, and `array<json>` fields. |
-| `field_tokenizers` | — | **`json` only.** Per-path tokenizer overrides. See [Per-path tokenizers for json](#per-path-tokenizers-for-json). |
+| `fields` | — | **`json` only.** Per-path sub-field definitions. Each key is a sub-path; value is `{ "tokenizer": "..." }`. See [Per-path field mapping for json](#per-path-field-mapping-for-json). |
+| `field_tokenizers` | — | **`json` only, deprecated.** Legacy shorthand for per-path tokenizers (`{ "path": "tokenizer" }`). Use `fields` instead. Accepted for backward compatibility. |
 
 ---
 
@@ -41,7 +42,7 @@ Full-text indexed string. The value is tokenized before indexing.
 |---|---|
 | `default` | Lowercase + split on whitespace and punctuation |
 | `raw` | Index the entire value as a single token (exact match) |
-| `raw_lower` | Index the entire value as one token, lowercased — exact case-insensitive match |
+| `raw_lower` | Index the entire value as one token, lowercased — exact case-insensitive match (hostnames, log levels) |
 | `en_stem` | English stemming (`running` → `run`) |
 | `whitespace` | Split on whitespace only, no case folding |
 | `ngram` | Character n-grams (prefix/substring search) |
@@ -125,29 +126,37 @@ Semi-structured JSON object. All string leaf values are tokenized and indexed; n
 
 Query a nested key: `metadata.color:blue`.
 
-#### Per-path tokenizers for json
+#### Per-path field mapping for json
 
-When different sub-paths of a json field need different tokenizers — e.g. exact-match on emails but order-independent phrase search on full names — use `field_tokenizers` instead of a single `tokenizer`. Set `"indexed": false` on the json field itself; tantex creates one internal text field per declared path and routes values at ingest time.
+When different sub-paths of a json field need different tokenizers — e.g. exact-match on a service name but full-text search on a log message — use `fields` instead of a single `tokenizer`. Set `"indexed": false` on the json field itself; tantex creates one internal text field per declared path and routes values at ingest time.
 
 ```json
 {
-  "name": "pii",
+  "name": "extra",
   "type": "json",
   "stored": true,
   "indexed": false,
-  "field_tokenizers": {
-    "emails":    "raw_lower",
-    "fullnames": "sorted",
-    "tags":      "default"
+  "fields": {
+    "service": { "tokenizer": "raw" },
+    "host":    { "tokenizer": "raw" },
+    "message": { "tokenizer": "default" }
   }
 }
 ```
 
-At query time, `pii.emails:"foo@bar.com"` is **automatically rewritten** to the internal field name before parsing — callers use the natural `field.path:value` syntax unchanged.
+At query time, `extra.service:nginx` is **automatically rewritten** to the internal field name before parsing — callers use the natural `field.path:value` syntax unchanged.
 
-Internally tantex creates fields named `__sub__pii__emails`, `__sub__pii__fullnames`, etc. These are indexed-only (not stored); the stored json field is used for retrieval. Internal field names are never exposed in search results.
+```
+extra.service:nginx
+extra.host:web-01
+extra.message:"connection refused"
+```
 
-Available tokenizers for `field_tokenizers`: same set as for `text` fields (`default`, `raw`, `raw_lower`, `sorted`, `en_stem`, `whitespace`, `ngram`).
+Internally tantex creates indexed-only fields (not stored) for each declared path. The stored json field is used for retrieval. Internal field names are never exposed in search results.
+
+Available tokenizers for sub-fields: same set as for `text` fields (`default`, `raw`, `raw_lower`, `sorted`, `en_stem`, `whitespace`, `ngram`).
+
+The legacy `field_tokenizers: { "path": "tokenizer" }` shorthand is still accepted for backward compatibility.
 
 ---
 

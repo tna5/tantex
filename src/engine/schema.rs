@@ -8,7 +8,7 @@ use tantivy::store::{Compressor, ZstdCompressor};
 use tantivy::IndexSettings;
 
 use crate::engine::query::subfield_internal_name;
-use crate::protocol::messages::{FieldDefinition, SchemaDefinition};
+use crate::protocol::messages::{FieldDefinition, SchemaDefinition, SubFieldDef};
 
 /// Parse the user-supplied compression name into a tantivy Compressor.
 /// Supported in tantivy 0.22: "none", "lz4" (default), "zstd", "zstd:<level>".
@@ -182,19 +182,44 @@ pub fn build_schema(
                 builder.add_bytes_field(&field_def.name, opts)
             }
             "json" => {
+                // Resolve per-path tokenizer map: `fields` takes precedence over `field_tokenizers`.
+                let resolved: Option<std::collections::BTreeMap<String, String>> =
+                    if let Some(ref f) = field_def.fields {
+                        Some(f.iter().map(|(k, v)| (k.clone(), v.tokenizer.clone())).collect())
+                    } else {
+                        field_def.field_tokenizers.clone()
+                    };
+
                 let mut opts = JsonObjectOptions::default();
                 if field_def.stored {
                     opts = opts.set_stored();
                 }
-                // When field_tokenizers is set, the json field itself is not indexed;
-                // per-path internal text fields handle indexing instead.
-                if field_def.indexed && field_def.field_tokenizers.is_none() {
+                // When per-path sub-fields are declared, the json field itself is not indexed;
+                // internal text fields per path handle indexing instead.
+                if field_def.indexed && resolved.is_none() {
                     let indexing = TextFieldIndexing::default()
                         .set_tokenizer(&field_def.tokenizer)
                         .set_index_option(IndexRecordOption::WithFreqsAndPositions);
                     opts = opts.set_indexing_options(indexing);
                 }
-                builder.add_json_field(&field_def.name, opts)
+                let json_field = builder.add_json_field(&field_def.name, opts);
+                field_map.insert(field_def.name.clone(), json_field);
+
+                // Create internal text fields for each declared sub-path.
+                if let Some(ref ft) = resolved {
+                    for (path, tokenizer_name) in ft {
+                        let internal_name = subfield_internal_name(&field_def.name, path);
+                        let text_opts = TextOptions::default().set_indexing_options(
+                            TextFieldIndexing::default()
+                                .set_tokenizer(tokenizer_name)
+                                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                        );
+                        let sub_field = builder.add_text_field(&internal_name, text_opts);
+                        field_map.insert(internal_name, sub_field);
+                    }
+                }
+                // Skip the json field insert below and the legacy block — already handled.
+                continue;
             }
             "ip" => {
                 let mut opts = IpAddrOptions::default();
@@ -214,23 +239,6 @@ pub fn build_schema(
             }
         };
         field_map.insert(field_def.name.clone(), field);
-
-        // For json fields with per-path tokenizers, create internal text fields.
-        // These are indexed-only (not stored): values are read back from the stored json.
-        if effective_type == "json" {
-            if let Some(ref ft) = field_def.field_tokenizers {
-                for (path, tokenizer_name) in ft {
-                    let internal_name = subfield_internal_name(&field_def.name, path);
-                    let text_opts = TextOptions::default().set_indexing_options(
-                        TextFieldIndexing::default()
-                            .set_tokenizer(tokenizer_name)
-                            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
-                    );
-                    let sub_field = builder.add_text_field(&internal_name, text_opts);
-                    field_map.insert(internal_name, sub_field);
-                }
-            }
-        }
     }
 
     Ok((builder.build(), field_map))
@@ -338,8 +346,12 @@ pub fn schema_to_definition(schema: &Schema, settings: Option<&IndexSettings>) -
             _ => ("unknown".to_string(), false, false, false, "default".to_string()),
         };
 
-        let field_tokenizers = if field_type == "json" {
-            json_ft.remove(&name).filter(|m| !m.is_empty())
+        let fields_map = if field_type == "json" {
+            json_ft.remove(&name).filter(|m| !m.is_empty()).map(|m| {
+                m.into_iter()
+                    .map(|(path, tok)| (path, SubFieldDef { tokenizer: tok }))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            })
         } else {
             None
         };
@@ -351,7 +363,8 @@ pub fn schema_to_definition(schema: &Schema, settings: Option<&IndexSettings>) -
             indexed,
             fast,
             tokenizer,
-            field_tokenizers,
+            fields: fields_map,
+            field_tokenizers: None,
         });
     }
 
