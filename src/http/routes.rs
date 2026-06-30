@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use axum::{
+    body::Bytes,
     extract::{State, Path, Json},
     http::StatusCode,
 };
@@ -261,4 +262,38 @@ pub async fn auth_status(
 ) -> Json<serde_json::Value> {
     let cfg = config.read().await;
     Json(serde_json::json!({ "auth_required": cfg.api_key.is_some() }))
+}
+
+/// POST /api/indexes/{name}/ingest — NDJSON body, one JSON document per line.
+/// Returns { indexed, errors }. Useful for HTTP-only clients (e.g. Docker on macOS
+/// where Unix socket / SHM is not available from inside a container).
+pub async fn ingest_index(
+    State((_config, index_manager)): State<AppState>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if body.is_empty() {
+        return Ok(Json(serde_json::json!({ "indexed": 0u64, "errors": 0u32 })));
+    }
+
+    let sender = {
+        let mgr = index_manager.read().await;
+        match mgr.get_managed_index(&name) {
+            Ok(managed) => managed.writer.sender.clone(),
+            Err(e) => return Err((StatusCode::NOT_FOUND, e.to_string())),
+        }
+    };
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let _ = sender.send(WriterCommand::AddDocumentsFromShm {
+        shm_data: body.to_vec(),
+        doc_count: 0, // ignored by the writer loop — it parses NDJSON itself
+        response: tx,
+    });
+
+    match rx.await {
+        Ok(Ok(indexed)) => Ok(Json(serde_json::json!({ "indexed": indexed, "errors": 0u32 }))),
+        Ok(Err(e)) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
 }

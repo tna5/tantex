@@ -9,7 +9,7 @@ use axum::{
     http::{StatusCode, Request, HeaderMap},
     response::IntoResponse,
     middleware::{self, Next},
-    extract::State,
+    extract::{State, DefaultBodyLimit},
     Json,
 };
 use rust_embed::RustEmbed;
@@ -22,7 +22,7 @@ use routes::{
     AppState,
     list_indexes, create_index, get_index, delete_index, commit_index, get_segments,
     search_index, get_metrics, metrics_stream, get_config, set_config,
-    auth_status, delete_by_query, set_index_settings,
+    auth_status, delete_by_query, set_index_settings, ingest_index,
 };
 
 #[derive(RustEmbed)]
@@ -197,6 +197,7 @@ pub async fn start_http_server(
         .route("/api/indexes/{name}/search", post(search_index))
         .route("/api/indexes/{name}/delete", post(delete_by_query))
         .route("/api/indexes/{name}/settings", post(set_index_settings))
+        .route("/api/indexes/{name}/ingest", post(ingest_index).layer(DefaultBodyLimit::max(128 * 1024 * 1024)))
         // Metrics
         .route("/api/metrics", get(get_metrics))
         .route("/api/metrics/stream", get(metrics_stream))
@@ -208,7 +209,7 @@ pub async fn start_http_server(
         .fallback(|uri: axum::http::Uri| serve_static(uri.path().to_string()))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
     log::info!("HTTP server listening on :{}", port);
 
     axum::serve(
