@@ -7,10 +7,12 @@ pub fn register_custom_tokenizers(index: &tantivy::Index) {
 }
 
 // ---------------------------------------------------------------------------
-// SortedTokenizer — word-splits, lowercases, sorts alphabetically, re-emits
-// with sequential positions 0..n.  Phrase matching becomes order-independent
-// and element-scoped (the indexer's per-value position gap prevents cross-
-// element matches even with POSITION_GAP = 1).
+// SortedTokenizer — splits on Unicode whitespace only, lowercases, sorts
+// alphabetically, re-emits with sequential positions 0..n. Phrase matching
+// becomes order-independent ("Jean Dupont" matches "Dupont Jean"). Hyphenated
+// tokens are preserved as a single token ("Dupont-Leroux" is not split), so
+// "Jean Leroux" does not match "Jean Dupont-Leroux". Cross-element false
+// positives are prevented by tantivy's per-value position gap.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -39,7 +41,7 @@ impl Tokenizer for SortedTokenizer {
 
     fn token_stream<'a>(&mut self, text: &'a str) -> SortedTokenStream {
         let mut tokens: Vec<Token> = text
-            .split(|c: char| !c.is_alphanumeric())
+            .split(|c: char| c.is_whitespace())
             .filter(|s| !s.is_empty() && s.len() <= 40)
             .map(|s| Token {
                 offset_from: 0,
